@@ -9,7 +9,6 @@ venv/
 
 # 결과 이미지/출력물 (필요하면 개별적으로 git add -f)
 outputs/
-*.png
 *.npy
 
 # 에디터/워크스페이스

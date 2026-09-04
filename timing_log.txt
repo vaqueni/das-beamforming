@@ -1,0 +1,24 @@
+run start: 2026-09-04T15:23:11.115917
+n_configs: 190
+
+[1/190] dynamic_f0.1_tukey10: 113.4 sec
+[2/190] dynamic_f0.2_tukey10: 111.6 sec
+[3/190] dynamic_f0.3_tukey10: 112.2 sec
+[4/190] dynamic_f0.4_tukey10: 113.2 sec
+[5/190] dynamic_f0.5_tukey10: 111.2 sec
+[6/190] dynamic_f0.6_tukey10: 111.0 sec
+[7/190] dynamic_f0.7_tukey10: 111.1 sec
+[8/190] dynamic_f0.8_tukey10: 111.5 sec
+[9/190] dynamic_f0.9_tukey10: 111.0 sec
+[10/190] dynamic_f1.0_tukey10: 111.2 sec
+[11/190] dynamic_f1.1_tukey10: 111.3 sec
+[12/190] dynamic_f1.2_tukey10: 112.2 sec
+[13/190] dynamic_f1.3_tukey10: 112.7 sec
+[14/190] dynamic_f1.4_tukey10: 114.8 sec
+[15/190] dynamic_f1.5_tukey10: 118.9 sec
+[16/190] dynamic_f1.6_tukey10: 113.3 sec
+[17/190] dynamic_f1.7_tukey10: 113.2 sec
+[18/190] dynamic_f1.8_tukey10: 114.3 sec
+[19/190] dynamic_f1.9_tukey10: 114.9 sec
+[20/190] dynamic_f0.1_tukey20: 116.9 sec
+[21/190] dynamic_f0.2_tukey20: 115.6 sec

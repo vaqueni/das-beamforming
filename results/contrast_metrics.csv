@@ -1,0 +1,3 @@
+source,CR_dB,CNR,gCNR,n_roi,n_bg,nrmse_vs_ref
+mine,-39.763,0.8001,0.9982,3882,13481,0.0428
+ustb_ref,-39.555,0.7973,0.9980,3882,13481,

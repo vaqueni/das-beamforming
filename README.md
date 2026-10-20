@@ -196,10 +196,57 @@ GPU에서는 빔포밍 합계가 12.8초이고, 남은 시간의 대부분(58초
   (칸마다 들쭉날쭉한 패턴은 이 정도 미세한 차이에서 나오는 변동입니다).
 - 기본값 f/1.7, Tukey 50의 CR / CNR / gCNR(−39.76 dB / 0.800 / 0.9983)은 §5 CPU 결과와 일치합니다.
 
+### 5.2 CUDA 커널 최적화 — 병목 확인 후 단계별 개선
+
+`dasKernelVariants.py`(변형 커널), `benchmark_kernels.py`(측정) — §5 커널에서 한 번에 한 가지씩 바꿔
+처리시간과 CPU 대비 NRMSE를 같이 쟀습니다. (contrast_speckle, 15회 median, `results/kernel_opt.csv`)
+
+![kernel optimization](results/kernel_opt.png)
+
+| 단계 | 변경 | 1 frame | 누적 향상 | NRMSE vs CPU |
+|---|---|---|---|---|
+| v0 | §5 기준 커널 (1D 블록 128) | 29.3 ms | 1.00× | 1.5 × 10⁻⁵ |
+| v1 | 블록 크기 512 | 22.1 ms | 1.32× | 1.5 × 10⁻⁵ |
+| v2 | 픽셀 2D 타일 (깊이 32 × 가로 8줄, 블록 256) | 15.1 ms | 1.95× | 1.5 × 10⁻⁵ |
+| **v3** | **평면파 15개씩 launch 분할** | **12.7 ms** | **2.30×** | **1.5 × 10⁻⁵** |
+| v4 | analytic signal을 fp16(half2)으로 저장 | 10.0 ms | 2.92× | 6.7 × 10⁻⁵ |
+| ✗ | 3D texture 하드웨어 선형보간 | 72.4 ms | 0.40× | 5.7 × 10⁻⁴ |
+| ✗ | 루프 순서 바꾸기 (평면파 바깥, 채널 안쪽) | 28.2 ms | 1.04× | 1.5 × 10⁻⁵ |
+| 하한선 | v1과 같은 연산, 데이터 전부 L2 상주 | 9.8 ms | 2.98× | — |
+
+resolution_distortion에서도 v3 12.2 ms(2.38×), v4 10.0 ms(2.89×)로 같은 결과입니다.
+v3까지는 정밀도 손실이 전혀 없어 **v3를 기본 설정**으로 채택했습니다 (`das_beamform_fast`, fp16은 `half=True` 선택).
+
+**1) 병목 진단 — Nsight Compute 없이 통제 실험으로.**
+보간 1회당 complex64 샘플 2개(16 B)를 읽는다고 계산하면 v0의 실효 처리량은 444 GB/s로,
+RTX 2070 SUPER DRAM 이론 대역폭(448 GB/s)과 같았습니다. 이를 확인하려고 연산은 그대로 두고
+75개 평면파가 모두 같은 0번 평면파 데이터(1.85 MB)만 읽게 바꾸자(L2 4 MB에 상주) **v1 대비 2.3배 빨라졌습니다** (22.1 → 9.8 ms).
+→ 병목은 연산이 아니라 **DRAM 대역폭**이고, 원인은 같은 샘플을 여러 픽셀이 다시 읽는데도
+캐시에서 재사용되지 못하는 것이었습니다 (전체 데이터 138 MB를 13 GB만큼 반복해서 읽음).
+
+**2) 왜 재사용이 안 됐나.** 한 (평면파, 채널) 행의 샘플을 공유하는 건 *같은 깊이, 이웃한 가로 위치*의 픽셀들입니다.
+그런데 v0는 블록이 깊이 방향 연속 픽셀이라 이웃 x 줄이 서로 다른 SM에 흩어지고,
+동시에 도는 warp들도 제각각 다른 채널·평면파를 읽어 순간 작업 집합이 L2보다 커졌습니다.
+
+**3) 해결.**
+- **v2 2D 타일**: 블록을 깊이 32 × 가로 8줄로 묶어, 비슷한 샘플 구간을 읽는 이웃 x 픽셀을 같은 SM(L1)에 모았습니다.
+  warp(32 스레드)는 여전히 한 x 줄의 연속 깊이라 메모리 접근 패턴은 그대로입니다.
+- **v3 launch 분할**: 75개 평면파를 15개씩 5번의 커널 launch로 나눴습니다. launch 경계에서 GPU 전체가 동기화되므로
+  한 launch가 읽는 데이터가 평면파 15장으로 제한됩니다. 픽셀마다 담당 스레드가 하나라 launch 사이 누적에 atomic이 필요 없습니다.
+- 결과적으로 v3(12.7 ms)는 "데이터가 전부 L2에 있다면"의 하한선(9.8 ms)의 약 77% 수준까지 왔습니다.
+  fp16(v4)은 읽는 바이트를 절반으로 줄여 하한선과 거의 같아지지만, CPU 대비 오차가 4배 커지는 trade-off입니다.
+
+**4) 채택하지 않은 시도.**
+- **Texture 하드웨어 보간**: 보간 가중치가 9-bit 고정소수점이라 오차가 37배 커지고,
+  3D texture 캐시의 지역성 가정이 이 접근 패턴(채널마다 평면파 75장을 건너뛰며 읽기)과 맞지 않아 2.4배 느려졌습니다.
+- **루프 순서 교환**: 평면파 바깥으로 돌리면 수신 지연 `sqrt`와 apodization을 75배 더 계산해야 하고,
+  warp 간 진행 속도가 달라 기대한 L2 재사용도 생기지 않았습니다. 같은 아이디어를 커널 *밖*(launch 분할)에서 강제한 것이 v3입니다.
+
 ### 다음 단계
 
 - [x] ~~**성능 최적화**: CuPy 기반 GPU 포팅 → before/after 처리시간 및 영상 일치도(NRMSE) 동시 보고~~ (§5)
-- [ ] CUDA 커널 추가 최적화: analytic signal을 texture memory(하드웨어 선형보간)로, Nsight Compute로 병목 확인
+- [x] ~~CUDA 커널 추가 최적화: 병목 확인 후 단계별 개선~~ (§5.2, 29.3 → 12.7 ms, 정밀도 동일)
+- [ ] Nsight Compute로 §5.2의 진단(DRAM 대역폭 병목, L2 hit rate 변화)을 하드웨어 카운터로 재확인
 - [x] ~~GPU 커널로 F# / Tukey 190 조합 스윕 재실행~~ (§5.1)
 - [ ] 횡방향 FWHM 차이 원인 규명 (§3.1 확인 과제)
 - [x] ~~F# / Tukey 스윕 결과를 PNG 눈으로 보는 대신 **지표 기반으로 정량 비교**~~ (§5.1, CR/CNR/gCNR 히트맵)
@@ -228,6 +275,9 @@ python runDasApodCompare.py --backend cpu
 # CPU vs GPU 처리시간 / 일치도 비교 (NVIDIA GPU + cupy 필요, results/gpu_benchmark.{csv,png})
 python benchmark_gpu.py --n-waves 75 --repeats 10
 python benchmark_gpu.py --skip-cpu       # CPU(약 2분/데이터) 생략하고 GPU만
+
+# CUDA 커널 최적화 단계별 비교 (첫 실행 시 CPU 기준 영상을 outputs/에 캐시, results/kernel_opt.{csv,png})
+python benchmark_kernels.py
 ```
 
 GPU 버전은 `pip install "cupy-cuda12x[ctk]"` 로 CUDA 런타임까지 함께 설치되며, CUDA Toolkit을 따로 깔 필요는 없습니다.
@@ -242,6 +292,8 @@ GPU 버전은 `pip install "cupy-cuda12x[ctk]"` 로 CUDA 런타임까지 함께 
 ├── dasBeamform.py            # DAS 빔포밍 본체, dynamic apodization, B-mode 변환
 ├── dasBeamformGpu.py         # GPU 버전: CuPy vectorized + CUDA RawKernel
 ├── benchmark_gpu.py          # CPU vs GPU 처리시간·NRMSE 비교 → results/gpu_benchmark.{csv,png}
+├── dasKernelVariants.py      # CUDA 커널 최적화 변형 (2D 타일, launch 분할, fp16, texture) + das_beamform_fast
+├── benchmark_kernels.py      # 커널 최적화 단계별 비교 → results/kernel_opt.{csv,png}
 ├── metrics.py                # FWHM / CR / CNR / gCNR / NRMSE 계산
 ├── validate_resolution.py    # 해상도 검증 진입점  → results/resolution_fwhm.{csv,png}
 ├── validate_contrast.py      # 대조도 검증 진입점  → results/contrast_metrics.{csv,png}

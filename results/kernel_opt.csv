@@ -1,0 +1,17 @@
+dataset,group,label,desc,time_ms,speedup_vs_v0,nrmse_vs_cpu
+contrast,ladder,v0 baseline,기준 커널 (1D 블록 128),29.28,1,1.55e-05
+contrast,ladder,v1 block 512,+ 블록 크기 512,22.14,1.322,1.55e-05
+contrast,ladder,v2 2D tile,+ 32 x 8 픽셀 2D 타일 (블록 256),15.05,1.946,1.55e-05
+contrast,ladder,v3 wave chunk,+ 평면파 15개씩 launch 분할,12.73,2.3,1.55e-05
+contrast,ladder,v4 half2,+ analytic을 fp16으로 저장,10.02,2.922,6.652e-05
+contrast,rejected,x texture,3D texture 하드웨어 보간 (블록 512),72.43,0.4043,0.0005673
+contrast,rejected,x wave-outer loop,루프 순서 평면파 바깥 (블록 512),28.23,1.037,1.54e-05
+contrast,bound,L2-resident bound,"v1과 같은 연산, 데이터가 전부 L2에 있을 때",9.834,2.978,nan
+resolution,ladder,v0 baseline,기준 커널 (1D 블록 128),29.01,1,4.686e-06
+resolution,ladder,v1 block 512,+ 블록 크기 512,21.98,1.32,4.686e-06
+resolution,ladder,v2 2D tile,+ 32 x 8 픽셀 2D 타일 (블록 256),14.22,2.04,4.686e-06
+resolution,ladder,v3 wave chunk,+ 평면파 15개씩 launch 분할,12.19,2.38,4.686e-06
+resolution,ladder,v4 half2,+ analytic을 fp16으로 저장,10.03,2.891,2.213e-05
+resolution,rejected,x texture,3D texture 하드웨어 보간 (블록 512),68.96,0.4206,0.0001861
+resolution,rejected,x wave-outer loop,루프 순서 평면파 바깥 (블록 512),27.87,1.041,4.696e-06
+resolution,bound,L2-resident bound,"v1과 같은 연산, 데이터가 전부 L2에 있을 때",9.698,2.991,nan

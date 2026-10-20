@@ -2,3 +2,5 @@ numpy
 scipy
 h5py
 matplotlib
+# GPU (선택): NVIDIA 드라이버만 있으면 CUDA Toolkit 별도 설치 불필요
+cupy-cuda12x[ctk]

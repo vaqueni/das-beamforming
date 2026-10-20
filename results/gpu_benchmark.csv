@@ -1,0 +1,11 @@
+dataset,impl,time_ms,speedup_vs_cpu,nrmse_vs_cpu,max_rel_err_vs_cpu,nrmse_vs_ustb,CR_dB,CNR,gCNR,fwhm_lat_mm,fwhm_ax_mm
+contrast,cpu_numpy,112385,1,0,0,0.0428249,-39.7627,0.800091,0.99822,,
+contrast,gpu_cupy,2731.08,41.1504,1.65644e-05,1.973e-05,0.0428249,-39.7627,0.800091,0.998259,,
+contrast,gpu_cuda,30.1362,3729.23,1.54956e-05,2.03353e-05,0.0428249,-39.7626,0.800091,0.998259,,
+contrast,gpu_cuda_end_to_end,50.506,2225.18,,,,,,,,
+contrast,gpu_hilbert_h2d,21.4862,,,,,,,,,
+resolution,cpu_numpy,112330,1,0,0,0.0186607,,,,0.583656,0.417871
+resolution,gpu_cupy,2701.64,41.5784,5.16176e-06,1.66473e-05,0.0186606,,,,0.583657,0.417871
+resolution,gpu_cuda,29.0321,3869.16,4.68643e-06,1.632e-05,0.0186606,,,,0.583657,0.417871
+resolution,gpu_cuda_end_to_end,42.5211,2641.75,,,,,,,,
+resolution,gpu_hilbert_h2d,13.8473,,,,,,,,,

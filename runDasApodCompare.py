@@ -1,76 +1,195 @@
-"""apodization 유무(boxcar 'none' vs dynamic f/1.7 tukey50)에 따른
-75-wave compounding 결과를 비교하는 스크립트.
+"""dynamic apodization 파라미터(F-number x Tukey roll) 스윕.
+
+  python runDasApodCompare.py [--backend gpu|cpu] [--n-waves 75] [--no-png]
+
+- 190개 설정(f# 0.1~1.9 x tukey10~100)마다 75-wave compounding 영상을 만들고
+  contrast_speckle 낭종에서 CR / CNR / gCNR을 잰다.
+- hilbert(analytic signal)는 f#/window와 무관하므로 루프 밖에서 한 번만 계산한다.
+- backend별로 출력 경로를 나눠 서로의 결과를 덮어쓰지 않는다.
+    timing_log_{backend}.txt                 설정별 시간 (beamform / metrics / plot / total)
+    outputs/tukeyNN_{backend}/*.png          설정별 B-mode 영상 (--no-png면 생략)
+    results/apod_sweep_{backend}.csv         설정별 지표 + 시간
+    results/apod_sweep_{backend}_heatmap.png f# x tukey 히트맵 (CR, CNR, gCNR)
+  (2026-09-04 CPU 스윕 원본은 timing_log.txt, outputs/tukeyNN/에 그대로 둔다.)
+- beamform 시간은 GPU 동기화 + 결과를 host로 내리는 시간(D2H)까지 포함한다.
 """
+import argparse
+import csv
+import os
 import time
 from datetime import datetime
+
+import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from scipy.signal import hilbert
 
 from uffLoader import load_picmus
 from dasBeamform import das_beamform, to_bmode
+import metrics
 
 UFF_PATH = r"./data/PICMUS/PICMUS_simulation_contrast_speckle.uff"
-TIMING_LOG = r"./timing_log.txt"
+F_NUMBERS = [f / 10 for f in range(1, 20)]          # 0.1 ~ 1.9
+TUKEY_PCTS = [i * 10 for i in range(1, 11)]         # 10 ~ 100
+DEFAULT_CFG = (1.7, 50)                              # 다른 검증 스크립트의 기본 설정
+
+
+def make_backend(name, picmus, n_waves):
+    """(hilbert 1회 시간 [s], beamform(f_number, window) -> numpy complex 함수) 반환."""
+    if name == "gpu":
+        import cupy as cp
+        from dasBeamformGpu import analytic_signal_gpu, das_beamform_cuda
+
+        t = time.perf_counter()
+        analytic = analytic_signal_gpu(picmus["data"])
+        cp.cuda.Device().synchronize()
+        t_hilbert = time.perf_counter() - t
+
+        def beamform(f_number, window):
+            img = das_beamform_cuda(picmus, n_waves=n_waves, apodization="dynamic",
+                                    f_number=f_number, window=window, analytic=analytic)
+            return cp.asnumpy(img)          # D2H가 끝나야 반환되므로 동기화도 겸한다
+        return t_hilbert, beamform
+
+    t = time.perf_counter()
+    analytic = hilbert(picmus["data"], axis=-1)
+    t_hilbert = time.perf_counter() - t
+
+    def beamform(f_number, window):
+        return das_beamform(picmus, n_waves=n_waves, apodization="dynamic",
+                            f_number=f_number, window=window, verbose=False,
+                            analytic=analytic)
+    return t_hilbert, beamform
+
+
+def plot_heatmap(rows, path, backend, n_waves):
+    """f# (가로) x tukey (세로) 격자에 CR / CNR / gCNR을 색으로 표시."""
+    fi = {f: j for j, f in enumerate(F_NUMBERS)}
+    ti = {t: i for i, t in enumerate(TUKEY_PCTS)}
+    panels = [("CR_dB", "CR [dB]  (lower = better)", "Blues_r", np.argmin),
+              ("CNR", "CNR  (higher = better)", "Blues", np.argmax),
+              ("gCNR", "gCNR  (higher = better)", "Blues", np.argmax)]
+
+    fig, axs = plt.subplots(3, 1, figsize=(11, 12), sharex=True)
+    for ax, (key, title, cmap, pick) in zip(axs, panels):
+        grid = np.full((len(TUKEY_PCTS), len(F_NUMBERS)), np.nan)
+        for r in rows:
+            grid[ti[r["tukey"]], fi[r["f_number"]]] = r[key]
+        im = ax.imshow(grid, cmap=cmap, aspect="auto", origin="lower",
+                       extent=[F_NUMBERS[0] - 0.05, F_NUMBERS[-1] + 0.05,
+                               TUKEY_PCTS[0] - 5, TUKEY_PCTS[-1] + 5])
+        fig.colorbar(im, ax=ax, pad=0.01)
+
+        bi, bj = np.unravel_index(pick(grid), grid.shape)
+        best_f, best_t, best_v = F_NUMBERS[bj], TUKEY_PCTS[bi], grid[bi, bj]
+        ax.plot(best_f, best_t, marker="*", ms=16, mfc="#f2b705", mec="black", mew=1.0,
+                ls="none", label=f"best: f/{best_f:.1f}, tukey{best_t} = {best_v:.3g}")
+        d_f, d_t = DEFAULT_CFG
+        ax.plot(d_f, d_t, marker="s", ms=12, mfc="none", mec="#d62728", mew=2.0, ls="none",
+                label=f"default: f/{d_f}, tukey{d_t} = {grid[ti[d_t], fi[d_f]]:.3g}")
+        ax.set_title(title, loc="left")
+        ax.set(ylabel="Tukey roll [%]", yticks=TUKEY_PCTS)
+        # 범례는 축 위 오른쪽 바깥에 둬서 히트맵 칸(특히 ★)을 가리지 않게 한다
+        ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=2, fontsize=8,
+                  frameon=False, borderaxespad=0.2)
+    axs[-1].set(xlabel="F-number", xticks=F_NUMBERS)
+    axs[-1].tick_params(axis="x", labelsize=8)
+    fig.suptitle(f"Apodization sweep, contrast_speckle (n_waves={n_waves}, backend={backend})")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backend", choices=["gpu", "cpu"], default="gpu")
+    ap.add_argument("--n-waves", type=int, default=75)
+    ap.add_argument("--no-png", action="store_true", help="설정별 B-mode PNG 저장 생략")
+    args = ap.parse_args()
+
+    timing_log = f"./timing_log_{args.backend}.txt"
+    png_dir = f"./outputs/tukeyNN_{args.backend}"
+    csv_path = f"./results/apod_sweep_{args.backend}.csv"
+    heatmap_path = f"./results/apod_sweep_{args.backend}_heatmap.png"
+    os.makedirs("./results", exist_ok=True)
+    if not args.no_png:
+        os.makedirs(png_dir, exist_ok=True)
+
     picmus = load_picmus(UFF_PATH)
-    extent = [picmus["x_axis"].min() * 1e3, picmus["x_axis"].max() * 1e3,
-              picmus["z_axis"].max() * 1e3, picmus["z_axis"].min() * 1e3]
+    x_axis, z_axis = picmus["x_axis"], picmus["z_axis"]
+    extent = [x_axis.min() * 1e3, x_axis.max() * 1e3, z_axis.max() * 1e3, z_axis.min() * 1e3]
 
+    configs = [(f"dynamic_f{f}_tukey{t}", f, t) for t in TUKEY_PCTS for f in F_NUMBERS]
 
-    configs = []
-    for i in range(1, 11):
-        for f in range(1, 20):
-            f_number = f / 10
-            label = f"dynamic_f{f_number}_tukey{i*10}"
-            configs.append(
-                (
-                    label,
-                    dict(apodization="dynamic", f_number=f_number, window=f"tukey{i*10}"),
-                )
-            )
+    t_all_start = time.perf_counter()
+    t_hilbert, beamform = make_backend(args.backend, picmus, args.n_waves)
 
-    # configs = [
-    #     # ("none", dict(apodization="none")),
-    #     ("dynamic_f1.7_tukey40", dict(apodization="dynamic", f_number=1.7, window="tukey40")),
-    # ]
+    # GPU는 첫 호출에 커널 컴파일이 섞이므로 측정 전에 한 번 따로 돌린다
+    t_warm = 0.0
+    if args.backend == "gpu":
+        t = time.perf_counter()
+        beamform(DEFAULT_CFG[0], f"tukey{DEFAULT_CFG[1]}")
+        t_warm = time.perf_counter() - t
 
-    t_all_start = time.time()
-    with open(TIMING_LOG, "w") as f:
-        f.write(f"run start: {datetime.now().isoformat()}\n")
-        f.write(f"n_configs: {len(configs)}\n\n")
+    with open(timing_log, "w", encoding="utf-8") as fh:
+        fh.write(f"run start: {datetime.now().isoformat()}\n")
+        fh.write(f"backend: {args.backend}\n")
+        fh.write(f"n_configs: {len(configs)}  n_waves: {args.n_waves}  png: {not args.no_png}\n")
+        fh.write(f"hilbert (1회, 전체 설정 공유): {t_hilbert * 1e3:.1f} ms\n")
+        if args.backend == "gpu":
+            fh.write(f"warm-up (커널 컴파일 포함, 측정 제외): {t_warm * 1e3:.1f} ms\n")
+        fh.write("\n[i/N] label: beamform / metrics / plot / total [ms]\n")
 
-    for i, (label, kwargs) in enumerate(configs, 1):
-        t0 = time.time()
-        print(f"=== [{i}/{len(configs)}] apodization={label} ===")
+    rows = []
+    for i, (label, f_number, tukey) in enumerate(configs, 1):
+        t0 = time.perf_counter()
+        image = beamform(f_number, f"tukey{tukey}")
+        t1 = time.perf_counter()
 
-        image = das_beamform(picmus, n_waves=75, **kwargs)
-        bmode = to_bmode(image, picmus["x_axis"], picmus["z_axis"])
+        m = metrics.contrast_metrics(metrics.to_grid(image, x_axis, z_axis), x_axis, z_axis)
+        t2 = time.perf_counter()
 
-        plt.figure(figsize=(5, 8))
-        plt.imshow(bmode, cmap="gray", extent=extent, aspect="auto")
-        plt.title(f"DAS B-mode (n_waves=75, apodization={label})")
-        plt.xlabel("Lateral [mm]")
-        plt.ylabel("Depth [mm]")
-        plt.colorbar(label="dB")
-        plt.tight_layout()
-        fname = f"./outputs/tukeyNN/das_result_apod_{label}.png"
-        plt.savefig(fname, dpi=150)
-        plt.close()
-        print(f"saved {fname}")
+        if not args.no_png:
+            bmode = to_bmode(image, x_axis, z_axis)
+            plt.figure(figsize=(5, 8))
+            plt.imshow(bmode, cmap="gray", extent=extent, aspect="auto")
+            plt.title(f"DAS B-mode (n_waves={args.n_waves}, {args.backend})\n{label}")
+            plt.xlabel("Lateral [mm]")
+            plt.ylabel("Depth [mm]")
+            plt.colorbar(label="dB")
+            plt.tight_layout()
+            plt.savefig(os.path.join(png_dir, f"das_result_apod_{label}.png"), dpi=150)
+            plt.close()
+        t3 = time.perf_counter()
 
-        elapsed = time.time() - t0
-        with open(TIMING_LOG, "a") as f:
-            f.write(f"[{i}/{len(configs)}] {label}: {elapsed:.1f} sec\n")
+        ms = [(t1 - t0) * 1e3, (t2 - t1) * 1e3, (t3 - t2) * 1e3, (t3 - t0) * 1e3]
+        rows.append(dict(label=label, f_number=f_number, tukey=tukey,
+                         beamform_ms=ms[0], metrics_ms=ms[1], plot_ms=ms[2], total_ms=ms[3],
+                         CR_dB=m["CR_dB"], CNR=m["CNR"], gCNR=m["gCNR"]))
+        print(f"[{i}/{len(configs)}] {label}: beamform {ms[0]:.1f} ms  "
+              f"CR={m['CR_dB']:.2f} dB  CNR={m['CNR']:.3f}  gCNR={m['gCNR']:.4f}")
+        with open(timing_log, "a", encoding="utf-8") as fh:
+            fh.write(f"[{i}/{len(configs)}] {label}: "
+                     f"{ms[0]:.1f} / {ms[1]:.1f} / {ms[2]:.1f} / {ms[3]:.1f}\n")
 
-    total_elapsed = time.time() - t_all_start
-    with open(TIMING_LOG, "a") as f:
-        f.write(f"\nrun end: {datetime.now().isoformat()}\n")
-        f.write(f"total_elapsed_sec: {total_elapsed:.1f}\n")
-        f.write(f"total_elapsed_min: {total_elapsed / 60:.2f}\n")
-    print(f"timing log saved: {TIMING_LOG}")
+    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+    plot_heatmap(rows, heatmap_path, args.backend, args.n_waves)
+
+    total = time.perf_counter() - t_all_start
+    bf = np.array([r["beamform_ms"] for r in rows])
+    with open(timing_log, "a", encoding="utf-8") as fh:
+        fh.write(f"\nbeamform 합계: {bf.sum() / 1e3:.2f} sec  "
+                 f"(설정당 평균 {bf.mean():.1f} ms, 중앙값 {np.median(bf):.1f} ms)\n")
+        fh.write(f"metrics 합계: {sum(r['metrics_ms'] for r in rows) / 1e3:.2f} sec\n")
+        fh.write(f"plot 합계: {sum(r['plot_ms'] for r in rows) / 1e3:.2f} sec\n")
+        fh.write(f"run end: {datetime.now().isoformat()}\n")
+        fh.write(f"total_elapsed_sec: {total:.1f}\n")
+        fh.write(f"total_elapsed_min: {total / 60:.2f}\n")
+    print(f"saved {timing_log}, {csv_path}, {heatmap_path}")
 
 
 if __name__ == "__main__":

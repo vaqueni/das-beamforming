@@ -1,8 +1,8 @@
 """Delay-and-Sum(DAS) 빔포밍 구현 (PICMUS 평면파 채널 데이터 기준).
 
 USTB의 +midprocess/das.m, +tools/matlab_beamformer.m 로직을 참고하여 Python/numpy로
-포팅한 버전. 정확도(참조 결과와의 일치) 우선으로 작성했고, 아직 GPU 가속은
-적용하지 않은 CPU 프로토타입이다.
+포팅한 버전. 정확도(참조 결과와의 일치) 우선으로 작성한 CPU 기준 구현이며,
+GPU 가속 버전은 dasBeamformGpu.py에 있다.
 
 알고리즘 순서 (das.m과 동일):
   1. RF 데이터를 fast-time(샘플) 축으로 hilbert 변환 -> analytic signal
@@ -81,7 +81,7 @@ def _resolve_apodization(apodization, scan_x, scan_z, elem_x, N_pixels, N_channe
 
 
 def das_beamform(picmus, n_waves=None, apodization="dynamic", f_number=1.7,
-                  window="tukey50", verbose=True):
+                  window="tukey50", verbose=True, analytic=None):
     """PICMUS 데이터를 DAS로 빔포밍한다.
 
     Parameters
@@ -96,6 +96,9 @@ def das_beamform(picmus, n_waves=None, apodization="dynamic", f_number=1.7,
         (N_channels,) ndarray      : 모든 픽셀에 동일하게 적용할 고정 채널 가중치.
         (N_pixels, N_channels) ndarray : 이미 계산된 가중치를 직접 전달.
     f_number, window : apodization="dynamic"일 때만 사용 (compute_apodization 참고).
+    analytic : 미리 계산한 analytic signal (N_waves, N_channels, N_samples).
+               파라미터 스윕처럼 같은 데이터를 여러 번 빔포밍할 때 hilbert를 한 번만 하려고 받는다.
+               None이면 내부에서 계산.
 
     Returns
     -------
@@ -122,7 +125,8 @@ def das_beamform(picmus, n_waves=None, apodization="dynamic", f_number=1.7,
                                      N_pixels, N_channels, f_number, window)
 
     # 1) RF -> analytic signal (fast-time 축 = 마지막 축)
-    analytic = hilbert(data, axis=-1)      # (N_waves, N_channels, N_samples) complex
+    if analytic is None:
+        analytic = hilbert(data, axis=-1)  # (N_waves, N_channels, N_samples) complex
 
     image = np.zeros(N_pixels, dtype=np.complex128)
 

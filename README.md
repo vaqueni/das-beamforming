@@ -1,22 +1,45 @@
-# PICMUS Plane-Wave DAS Beamformer (Python)
+# PICMUS Plane-Wave DAS Beamformer — Python 구현 · CUDA GPU 가속
 
-초음파 평면파(plane-wave) 채널 데이터로부터 **Delay-and-Sum(DAS) 빔포밍을 Python/NumPy로 직접 구현**하고,
-그 결과를 PICMUS 공개 데이터셋과 USTB 참조 영상에 대해 **정량 지표(FWHM, CR/CNR/gCNR)로 검증**한 프로젝트입니다.
+초음파 평면파(plane-wave) 채널 데이터로부터 **Delay-and-Sum(DAS) 빔포밍을 직접 구현**하고,
+PICMUS 공개 데이터셋과 USTB 참조 영상에 대해 **정량 지표(FWHM, CR/CNR/gCNR)로 정확도를 검증**한 뒤,
+**CUDA 커널로 GPU 가속**해 프레임당 112초 걸리던 처리를 12.7 ms로 줄인 프로젝트입니다.
 
 MATLAB 기반 USTB(Ultrasound Toolbox)의 `midprocess.das` 로직을 참고해 포팅했으며,
 MATLAB 라이선스 없이 `.uff`(HDF5) 파일을 직접 읽어 전 과정을 Python으로 재현했습니다.
+GPU 버전은 CuPy `RawKernel`로 작성한 CUDA C 커널입니다.
 
 ---
 
 ## 핵심 결과
 
-75개 평면파 coherent compounding, dynamic receive apodization(F# = 1.7, Tukey 50%) 기준
-— 동일 데이터에 동봉된 **USTB 참조 빔포밍 결과와 비교**했습니다.
+75개 평면파 coherent compounding, 236k pixels, dynamic receive apodization(F# = 1.7, Tukey 50%) 기준.
+
+### 1. 성능 — CUDA GPU 가속 (§5)
+
+| 구현 | 1 frame | CPU 대비 | dB NRMSE vs CPU |
+|---|---|---|---|
+| CPU NumPy (float64) | 112.4 s | 1× | — |
+| GPU CUDA 커널 — 기본 포팅 (§5.2 v0) | 29.3 ms | 3,800× | 1.5 × 10⁻⁵ |
+| **GPU CUDA 커널 — 최적화 (§5.2)** | **12.7 ms** | **8,800×** | **1.5 × 10⁻⁵** |
+
+(RTX 2070 SUPER, GPU는 15회 median. 빔포밍 커널 시간 기준이며, RF 데이터의 GPU 전송 + Hilbert 변환은 별도 약 14~21 ms)
+
+- **정확도 손실 없음**: GPU(float32)와 CPU(float64)의 dB 영상 오차가 10⁻⁵ 수준이고, CR/CNR/gCNR과 FWHM도 동일합니다.
+- **병목을 진단하고 고쳤습니다**: 실효 처리량이 DRAM 이론 대역폭(448 GB/s)에 붙어 있는 것을 확인했고,
+  데이터를 L2에 상주시키는 통제 실험으로 *캐시 재사용 부족*이 원인임을 확인했습니다.
+  이어서 픽셀 2D 타일링과 평면파 단위 launch 분할로 **2.3배** 더 줄였습니다.
+- **파라미터 탐색 시간**: F# × Tukey 190조합 스윕이 **5시간 52분 → 1분 14초**가 됐습니다 (§5.1).
+
+![kernel optimization](results/kernel_opt.png)
+
+### 2. 정확도 — USTB 참조 구현과 비교 (§3)
+
+동일 데이터에 동봉된 **USTB 참조 빔포밍 결과와 비교**했습니다.
 
 | 지표 | 내 구현 | USTB 참조 | 비고 |
 |---|---|---|---|
 | Axial FWHM (18 points 평균) | **0.418 mm** (1.41 λ) | 0.417 mm (1.41 λ) | 차이 0.2 % |
-| Lateral FWHM (18 points 평균) | **0.584 mm** (1.97 λ) | 0.658 mm (2.23 λ) | 11 % 더 좁음 (§4.1) |
+| Lateral FWHM (18 points 평균) | **0.584 mm** (1.97 λ) | 0.658 mm (2.23 λ) | 11 % 더 좁음 (§3.1) |
 | CR | **−39.76 dB** | −39.56 dB | 차이 0.21 dB |
 | CNR | **0.800** | 0.797 | 차이 0.4 % |
 | gCNR | **0.9982** | 0.9980 | 차이 0.02 % |

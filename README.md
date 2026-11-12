@@ -265,6 +265,60 @@ RTX 2070 SUPER DRAM 이론 대역폭(448 GB/s)과 같았습니다. 이를 확인
 - **루프 순서 교환**: 평면파 바깥으로 돌리면 수신 지연 `sqrt`와 apodization을 75배 더 계산해야 하고,
   warp 간 진행 속도가 달라 기대한 L2 재사용도 생기지 않았습니다. 같은 아이디어를 커널 *밖*(launch 분할)에서 강제한 것이 v3입니다.
 
+### 5.3 해상도 ↔ 대조도 트레이드오프 (CR vs FWHM 파레토 프론트)
+
+§5.1의 190 조합을 `resolution_distortion` 데이터에도 그대로 돌려, 설정마다
+point target 18개의 **횡/축 FWHM**을 재고 contrast 결과와 label로 조인했습니다.
+(`runDasApodCompare.py --dataset resolution` → `runParetoFront.py`, GPU 190조합 **14.5 초**,
+설정당 beamform 평균 48.7 ms. 18개 point 모두 전 설정에서 -6 dB 교차점 검출에 성공했습니다.)
+
+FWHM과 CR은 **둘 다 작을수록 좋은** 지표라, 두 지표를 동시에 지배당하지 않는
+비지배 집합(파레토 프론트)을 구했습니다.
+
+![CR vs FWHM 파레토 프론트](results/pareto_cr_fwhm.png)
+
+| f# | Tukey | lateral FWHM [mm] | CR [dB] | CNR | gCNR | 비고 |
+|---|---|---|---|---|---|---|
+| 0.1 | 10 | 0.352 | -40.72 | 0.747 | 0.9981 | 해상도 우선 |
+| 0.1 | 100 | 0.354 | -40.75 | 0.749 | 0.9979 | |
+| 0.2 | 90 | 0.359 | -40.77 | 0.751 | 0.9979 | |
+| 0.2 | 100 | 0.363 | -40.84 | 0.755 | 0.9979 | |
+| 0.3 | 90 | 0.372 | -40.87 | 0.759 | 0.9984 | |
+| 0.3 | 100 | 0.378 | -40.96 | 0.763 | 0.9985 | |
+| 0.4 | 90 | 0.389 | -41.02 | 0.769 | 0.9985 | |
+| 0.4 | 100 | 0.397 | -41.10 | 0.773 | 0.9980 | |
+| 0.5 | 90 | 0.410 | -41.16 | 0.779 | 0.9981 | |
+| 0.5 | 100 | 0.418 | -41.22 | 0.782 | 0.9981 | |
+| 0.6 | 90 | 0.433 | -41.25 | 0.788 | 0.9982 | |
+| 0.6 | 100 | 0.442 | -41.29 | 0.790 | 0.9979 | 대조도 우선 |
+
+190개 중 프론트에 남은 것은 12개이고, 전부 **낮은 F-number(0.1~0.6) + 넓은 Tukey(90~100)** 구간입니다.
+
+**1) 트레이드오프가 실제로 존재하는 구간은 좁습니다.**
+프론트 양 끝의 차이는 CR 0.57 dB 대 횡방향 FWHM 26 %입니다.
+즉 대조도 0.57 dB를 더 얻으려면 횡방향 해상도를 0.352 → 0.442 mm로 내줘야 합니다.
+
+**2) 프론트 바깥에서는 트레이드오프가 아니라 양쪽이 같이 나빠집니다.**
+F-number를 키우면 유효 구경이 좁아져 FWHM은 단조 증가(f/0.1 평균 0.352 mm → f/1.9 평균 0.605 mm)하는데,
+CR은 단조가 아니라 **f/0.8 부근(평균 -40.99 dB)에서 가장 좋고 그 뒤로 다시 나빠집니다**(f/1.9 평균 -39.25 dB).
+f/0.8을 넘어서면 해상도와 대조도가 동시에 손해라, 이 구간의 설정은 전부 지배당합니다.
+
+**3) 기존 기본 설정 f/1.7 · tukey50은 프론트 위가 아닙니다.**
+FWHM 0.584 mm, CR -39.76 dB로, **190개 중 151개 설정이 두 지표 모두에서 더 낫습니다.**
+예를 들어 f/0.6 · tukey100으로 바꾸면 FWHM 0.442 mm(-24 %), CR -41.29 dB(1.53 dB 개선)로
+어느 쪽도 손해 보지 않고 옮겨갈 수 있습니다.
+
+**4) 해석할 때의 단서.**
+- gCNR은 190개 설정이 0.9978 ~ 0.9993 안에 몰려(변동 폭 0.0015) 사실상 포화라, 이 격자에서는 설정을 구분하지 못합니다.
+  판별력이 있는 것은 CR과 CNR 쪽입니다.
+- 낮은 F-number가 이기는 것은 이 데이터가 **수차(aberration) 없는 시뮬레이션**이기 때문으로 보입니다.
+  구경을 넓게 열수록 이득이고 손해가 거의 없는 조건입니다. 실측 데이터(PICMUS experimental)에서는
+  가장자리 채널의 수차·SNR 저하 때문에 최적 F-number가 올라갈 가능성이 큽니다 — 다음 단계의 확인 과제입니다.
+
+원자료: `results/pareto_cr_fwhm.csv`(설정별 조인 결과 + 프론트 여부),
+`results/apod_sweep_resolution_gpu_points.csv`(설정 × point 18개 FWHM),
+`results/apod_sweep_resolution_gpu_heatmap.png`(f# × Tukey FWHM 히트맵).
+
 ### 다음 단계
 
 - [x] ~~**성능 최적화**: CuPy 기반 GPU 포팅 → before/after 처리시간 및 영상 일치도(NRMSE) 동시 보고~~ (§5)
@@ -273,8 +327,7 @@ RTX 2070 SUPER DRAM 이론 대역폭(448 GB/s)과 같았습니다. 이를 확인
 - [x] ~~GPU 커널로 F# / Tukey 190 조합 스윕 재실행~~ (§5.1)
 - [ ] 횡방향 FWHM 차이 원인 규명 (§3.1 확인 과제)
 - [x] ~~F# / Tukey 스윕 결과를 PNG 눈으로 보는 대신 **지표 기반으로 정량 비교**~~ (§5.1, CR/CNR/gCNR 히트맵)
-- [ ] 같은 스윕에 resolution_distortion 데이터의 FWHM 추가 (CR ↔ 해상도 trade-off 확인)
-      — 코드는 준비 완료(`--dataset resolution`, `runParetoFront.py`), GPU 스윕 실행 후 결과 반영 예정
+- [x] ~~같은 스윕에 resolution_distortion 데이터의 FWHM 추가 (CR ↔ 해상도 trade-off 확인)~~ (§5.3)
 - [ ] 실측 데이터(PICMUS experimental)로 확장
 
 ## 6. 실행 방법
@@ -302,7 +355,9 @@ python runDasApodCompare.py --dataset contrast   --backend cpu
 
 # 두 스윕 결과를 묶어 CR vs FWHM 파레토 프론트 (해상도 ↔ 대조도 trade-off)
 python runParetoFront.py --backend gpu               # --metric fwhm_ax_mm : 축방향 기준
-#   Windows에서는 runSweeps.bat 를 실행하면 위 resolution 스윕 + 파레토를 한 번에 돌린다
+
+# 위 스윕 2종 + 파레토를 순서대로 실행 (결과 CSV가 있는 단계는 건너뜀, --force로 재실행)
+python runSweeps.py --backend gpu
 
 # CPU vs GPU 처리시간 / 일치도 비교 (NVIDIA GPU + cupy 필요, results/gpu_benchmark.{csv,png})
 python benchmark_gpu.py --n-waves 75 --repeats 10
@@ -334,7 +389,7 @@ GPU 버전은 `pip install "cupy-cuda12x[ctk]"` 로 CUDA 런타임까지 함께 
 ├── runDasApodCompare.py      # apodization 파라미터 스윕 (--dataset contrast|resolution, --backend gpu|cpu)
 │                             #   → results/apod_sweep_{suffix}.{csv,_heatmap.png}, resolution은 point별 원자료 CSV도 저장
 ├── runParetoFront.py         # 두 스윕을 조인해 CR vs FWHM 파레토 프론트 → results/pareto_cr_fwhm.{csv,png} + pareto_summary.md
-├── runSweeps.bat             # (Windows) resolution 스윕 + 파레토 프론트 한 번에 실행
+├── runSweeps.py              # 스윕 2종 + 파레토를 순서대로 실행하는 엔트리포인트 (단계별 skip/force)
 ├── timing_log.txt            # CPU 스윕 190회 처리시간 기록 (2026-09-04)
 ├── timing_log_gpu.txt        # GPU 스윕 190회 처리시간 기록 (beamform / metrics / plot 분리)
 ├── results/                  # 정량 검증 결과 (CSV, 그림)

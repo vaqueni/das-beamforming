@@ -274,6 +274,7 @@ RTX 2070 SUPER DRAM 이론 대역폭(448 GB/s)과 같았습니다. 이를 확인
 - [ ] 횡방향 FWHM 차이 원인 규명 (§3.1 확인 과제)
 - [x] ~~F# / Tukey 스윕 결과를 PNG 눈으로 보는 대신 **지표 기반으로 정량 비교**~~ (§5.1, CR/CNR/gCNR 히트맵)
 - [ ] 같은 스윕에 resolution_distortion 데이터의 FWHM 추가 (CR ↔ 해상도 trade-off 확인)
+      — 코드는 준비 완료(`--dataset resolution`, `runParetoFront.py`), GPU 스윕 실행 후 결과 반영 예정
 - [ ] 실측 데이터(PICMUS experimental)로 확장
 
 ## 6. 실행 방법
@@ -291,9 +292,17 @@ python validate_contrast.py   --n-waves 75
 # 평면파 1장씩 개별 빔포밍 (compounding 효과 확인용, outputs/per_wave/)
 python runDasPerWave.py
 
-# apodization 파라미터 스윕 + CR/CNR/gCNR 히트맵 (GPU 약 1분, CPU 약 6시간)
-python runDasApodCompare.py --backend gpu            # --no-png: 설정별 B-mode PNG 저장 생략
-python runDasApodCompare.py --backend cpu
+# apodization 파라미터 스윕 190조합 (GPU 약 1분, CPU 약 6시간)
+#   --dataset contrast   : contrast_speckle 에서 CR / CNR / gCNR 히트맵
+#   --dataset resolution : resolution_distortion point target 18개의 FWHM 히트맵
+python runDasApodCompare.py --dataset contrast   --backend gpu   # --no-png: 설정별 B-mode PNG 생략
+python runDasApodCompare.py --dataset resolution --backend gpu
+python runDasApodCompare.py --dataset contrast   --backend cpu
+#   --limit N : 앞쪽 N개 설정만 돌리는 동작 확인용
+
+# 두 스윕 결과를 묶어 CR vs FWHM 파레토 프론트 (해상도 ↔ 대조도 trade-off)
+python runParetoFront.py --backend gpu               # --metric fwhm_ax_mm : 축방향 기준
+#   Windows에서는 runSweeps.bat 를 실행하면 위 resolution 스윕 + 파레토를 한 번에 돌린다
 
 # CPU vs GPU 처리시간 / 일치도 비교 (NVIDIA GPU + cupy 필요, results/gpu_benchmark.{csv,png})
 python benchmark_gpu.py --n-waves 75 --repeats 10
@@ -322,7 +331,10 @@ GPU 버전은 `pip install "cupy-cuda12x[ctk]"` 로 CUDA 런타임까지 함께 
 ├── validate_contrast.py      # 대조도 검증 진입점  → results/contrast_metrics.{csv,png}
 ├── runDas.py                 # 단일 B-mode 생성
 ├── runDasPerWave.py          # 평면파별 개별 빔포밍
-├── runDasApodCompare.py      # apodization 파라미터 스윕 (--backend gpu|cpu) → results/apod_sweep_{backend}.{csv,_heatmap.png}
+├── runDasApodCompare.py      # apodization 파라미터 스윕 (--dataset contrast|resolution, --backend gpu|cpu)
+│                             #   → results/apod_sweep_{suffix}.{csv,_heatmap.png}, resolution은 point별 원자료 CSV도 저장
+├── runParetoFront.py         # 두 스윕을 조인해 CR vs FWHM 파레토 프론트 → results/pareto_cr_fwhm.{csv,png} + pareto_summary.md
+├── runSweeps.bat             # (Windows) resolution 스윕 + 파레토 프론트 한 번에 실행
 ├── timing_log.txt            # CPU 스윕 190회 처리시간 기록 (2026-09-04)
 ├── timing_log_gpu.txt        # GPU 스윕 190회 처리시간 기록 (beamform / metrics / plot 분리)
 ├── results/                  # 정량 검증 결과 (CSV, 그림)
